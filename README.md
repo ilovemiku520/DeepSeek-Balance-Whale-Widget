@@ -7,6 +7,29 @@ DeepSeek Harness（DSH）Web 界面右下角的常驻挂件：小鲸鱼气泡图
 > ⚠️ **Codex 版小鲸鱼已迁至独立仓库** → <https://github.com/Yang-huai406/Codex-Whale-Public>（**已安装用户无需重装**；详见下方「两条分支怎么选」）
 <!-- 迁移横幅（v0.3.19 起）：迁移稳定后（约 2026-11，或发过 1–2 个版本）可只删这一行 blockquote，保留下方分支表与「致谢」——别让它长期占着第一屏 -->
 
+## Windows 独立窗口（可选）
+
+在鲸鱼菜单启用「独立窗口」，挂件会在 DSH 最小化时继续显示；「独立窗口置顶」可单独切换。
+默认关闭。Windows 10/11 x64 需要 WebView2 Evergreen Runtime；缺失时回到页内挂件，不自动安装软件。
+
+窗口采用 WPF + WebView2CompositionControl，复用原网页界面。窗口只保留鲸鱼、气泡和面板的有限矩形区域，
+区域以外由 Windows 直接命中桌面；不再根据光标位置异步开关整个窗口的鼠标穿透。启动、页面失败或一秒无响应时，
+窗口区域清空并释放拖动捕获。CSS 坐标按实际客户区尺寸映射为物理像素，兼容 DPI 和浏览器缩放。
+
+限制：覆盖主屏工作区；矩形内的透明边角仍可能接收点击，不承诺像素级穿透；区域更新约每 33ms 发起一次，
+拖动/吸附动画可能短暂裁边。独立模式的弹窗只保留内容卡片，点击卡片外会操作桌面，请用卡片按钮关闭弹窗。
+页内版本的弹窗行为不变。独立窗口打开时页内挂件隐藏并静音。
+
+配置、命令、状态和日志保存到 `$DSH_HOME`（默认用户目录的 `.dsh`）下 `.dshw-window*`，
+WebView2 数据放在 `whale-window-profile/`；源码位置按插件安装目录自动计算，不依赖开发机路径。
+宿主只在启动子进程时私下传递登录会话，首次导航前写入 WebView2；所有 HTTP 路由保留原有认证栅栏。
+
+新增 `GET /dsh-whale/window.html` 与 `GET / HEAD / POST /dsh-whale/window.json`，全插件共 **28 个**路由。
+
+独立窗口基础实现来自 [lvxingye 的贡献](https://github.com/lvxingye/DeepSeek-Balance-Whale-Widget)
+及上游 [#264](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/264)，本次补上窗口区域、认证与发布验证。
+验证和维护说明见 [native/window/README.md](native/window/README.md)。
+
 ## 两条分支怎么选
 
 本仓库现在只维护**一条产品线**（`main`，同一个包同时支持 DSH Web 与官方桌面客户端）。按你要挂在哪里选：
@@ -416,7 +439,7 @@ curl http://127.0.0.1:3080/dsh-whale/audio.json
 - `/dsh-whale/update-check.json` → 200 JSON：检查更新（`{ok, current, latest, hasUpdate, source}`）；**点了才联网**，镜像优先（npmmirror → jsdelivr → unpkg → npmjs）+ `npm view` 兜底，宿主侧 10 分钟缓存
 - 浏览器 F5 后右下角出现挂件
 
-> ⚠️ **关于上面这些 `curl`**：全部 **26 个** `/dsh-whale/*` 路由都已接入 **DSH 浏览器信任栅栏**（`connection.requestRejection`）。
+> ⚠️ **关于上面这些 `curl`**：全部 **28 个** `/dsh-whale/*` 路由都已接入 **DSH 浏览器信任栅栏**（`connection.requestRejection`）。
 > 因此**不带会话凭据的裸 `curl` 会返回 401**（伪造 `Host` 头则是 403）—— 这是预期行为，不是接口坏了。
 > 想验证接口是否存活，看返回 **401/403** 即说明路由已注册且栅栏在工作；在浏览器里访问同一条路径（带会话）才是 200。
 > 另外**自 0.3.15 起，写请求（`POST`/`PUT`/`PATCH`/`DELETE`）还必须是本机来源**（Host 为 `127.0.0.1`/`localhost`/`[::1]`），否则 403 —— 详见上方「安全边界」。
