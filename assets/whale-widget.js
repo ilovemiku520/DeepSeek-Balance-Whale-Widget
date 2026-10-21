@@ -21742,6 +21742,8 @@ function onDocPointerDown(e) {
   var vp = viewport()
   var rect = root.getBoundingClientRect()
   drag = { active: true, startX: e.clientX, startY: e.clientY, origLeft: rect.left, origTop: rect.top, w: rect.width, h: rect.height, moved: false, vp: vp }
+  dshwvNativeLastPointer(e)
+  dshwvNativeDragSignal(true)
   root.classList.add('dshwv-dragging')
   pressDown()
   setWidgetCursor('grabbing')
@@ -21980,6 +21982,7 @@ try { applyMenuBtnHideUI() } catch (err) {}
 
 function endDrag(e, clickAllowed, cancelled) {
   if (!drag || !drag.active) return
+  dshwvNativeDragSignal(false)
   drag.active = false
   document.removeEventListener('pointermove', onDocPointerMove, true)
   document.removeEventListener('pointerup', onDocPointerUp, true)
@@ -22372,11 +22375,11 @@ function dshwvNativeDragSignal(on) {
 }
 if (dshwInNativeWindow) {
   try {
-    document.addEventListener('pointerdown', function (e) { if (e.button === 0) dshwvNativeDragSignal(true); dshwvNativeLastPointer(e) }, true)
     document.addEventListener('pointermove', function (e) { dshwvNativeLastPointer(e) }, true)
-    document.addEventListener('pointerup', function (e) { if (e.button === 0) dshwvNativeDragSignal(false) }, true)
-    document.addEventListener('pointercancel', function () { dshwvNativeDragSignal(false) }, true)
-    window.addEventListener('blur', function () { dshwvNativeDragSignal(false) })
+    window.addEventListener('blur', function () {
+      if (drag && drag.active) endDrag(null, false, true)
+      else dshwvNativeDragSignal(false)
+    })
   } catch (err) {}
   // 原生侧的兜底钩子：拖动期间捕获被别的窗口抢走（拖到任务栏上松手最典型）时，mouseup 会送给
   // 对方，我们这边永远等不到 pointerup，挂件就停在"按下"态。原生发现"左键已经松了"会调这里，
@@ -22413,7 +22416,7 @@ function dshwvRenderNativeWindowState(st) {
     var baseTitle = '开一个独立的桌面小鲸鱼（原生透明覆盖层）：DSH 最小化/被遮挡时余额与提醒仍然可见、可拖动贴边'
     if (st && st.supported === false) {
       nativeWindowToggle.disabled = true
-      nativeWindowToggle.title = '独立窗口目前只支持 Windows 桌面端（需要 WebView2 运行时，Windows 10/11 自带）'
+      nativeWindowToggle.title = '独立窗口适用于 x64 Windows 电脑系统，需要安装 WebView2 Evergreen Runtime'
     } else if (st && st.error) {
       // 宿主把失败原因（例如页面没能起来，窗口已被自动收掉）带出来，鼠标停在开关上就能看到
       nativeWindowToggle.title = baseTitle + '\n最近一次失败：' + st.error + (st.log ? '\n日志：' + st.log : '')

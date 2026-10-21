@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import vm from 'node:vm'
 import assert from 'node:assert/strict'
 import { createHash, createHmac } from 'node:crypto'
+import './window-host-test.mjs'
 
 const html = fs.readFileSync(new URL('../assets/window.html', import.meta.url), 'utf8')
 const script = html.match(/window\.__dshwGetWindowRegion = function \(\) \{[\s\S]*?\n\}/)[0]
@@ -85,3 +86,107 @@ const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
 assert.equal(decoded.authority, '127.0.0.1:12345')
 assert.equal(decoded.expiresAt - decoded.issuedAt, 60000)
 console.log('PASS: standalone HTTP auth fence, no response cookie, private child session signature/authority/expiry')
+
+// Run the widget's actual drag handlers and native listeners. Menu presses must
+// never capture desktop input; only an accepted whale gesture owns the capture.
+const widget = fs.readFileSync(new URL('../assets/whale-widget.js', import.meta.url), 'utf8')
+function widgetFunction(name, nextName) {
+  const begin = widget.indexOf('function ' + name + '(')
+  const end = widget.indexOf('\nfunction ' + nextName + '(', begin)
+  assert.ok(begin >= 0 && end > begin, name + ' source is present')
+  return widget.slice(begin, end)
+}
+const pointerListeners = new Map()
+const windowListeners = new Map()
+const nativeEvents = []
+let whaleClicks = 0
+const dragRoot = {
+  style: {}, classList: { add() {}, remove() {} },
+  getBoundingClientRect: () => ({ left: 200, top: 300, width: 100, height: 100 }),
+}
+const dragContext = vm.createContext({
+  drag: null, menuOpen: false, dshwInNativeWindow: true, state: {},
+  root: dragRoot,
+  document: {
+    addEventListener(type, handler) {
+      if (!pointerListeners.has(type)) pointerListeners.set(type, new Set())
+      pointerListeners.get(type).add(handler)
+    },
+    removeEventListener(type, handler) {
+      nativeEvents.push('remove:' + type)
+      pointerListeners.get(type)?.delete(handler)
+    },
+  },
+  window: {
+    chrome: { webview: { postMessage: value => nativeEvents.push(value) } },
+    addEventListener(type, handler) { windowListeners.set(type, handler) },
+  },
+  isWhaleHit: event => event.whale === true,
+  viewport: () => ({ w: 1000, h: 800 }),
+  closeRolePanel() {}, closeAudioGroupPanel() {}, closeMenu() {},
+  pressDown() {}, pressUp() {}, setWidgetCursor() {}, settle() {},
+  longPressRecent: () => false, whaleClick() { whaleClicks++ }, refresh() {},
+  onDocPointerMove() {},
+})
+const nativeBegin = widget.indexOf('var dshwvNativeLast = ')
+const nativeEnd = widget.indexOf('\nfunction dshwvApplyNativeYield(', nativeBegin)
+assert.ok(nativeBegin >= 0 && nativeEnd > nativeBegin)
+vm.runInContext([
+  widgetFunction('onDocPointerDown', 'onDocPointerMove'),
+  widgetFunction('onDocPointerUp', 'onDocPointerCancel'),
+  widgetFunction('onDocPointerCancel', 'onDocClickStopper'),
+  widgetFunction('endDrag', 'applyAnchorPos'),
+  widget.slice(nativeBegin, nativeEnd),
+  "document.addEventListener('pointerdown', onDocPointerDown, true)",
+].join('\n'), dragContext)
+function dispatchPointer(type, { selector = '', whale = false, button = 0, x = 230, y = 340 } = {}) {
+  const event = { button, pointerType: 'mouse', clientX: x, clientY: y, whale,
+    target: { closest: query => query === selector }, preventDefault() {}, stopPropagation() {} }
+  for (const handler of [...(pointerListeners.get(type) || [])]) handler(event)
+}
+for (const selector of ['.dshwv-menu-btn', '.dshwv-menu', '.dshwv-custbtn', '.dshwv-usagepanel']) {
+  nativeEvents.length = 0
+  dispatchPointer('pointerdown', { selector, whale: true })
+  dispatchPointer('pointerup', { selector, whale: true })
+  assert.equal(dragContext.drag, null)
+  assert.deepEqual(nativeEvents, [], selector + ' leaves native capture alone')
+}
+dispatchPointer('pointerdown', { whale: false })
+dispatchPointer('pointerdown', { whale: true, button: 2 })
+assert.deepEqual(nativeEvents, [])
+dispatchPointer('pointerdown', { whale: true, x: 260, y: 370 })
+assert.equal(dragContext.drag.active, true)
+assert.deepEqual(nativeEvents, ['drag:1'])
+assert.deepEqual({ ...dragContext.dshwvNativeLast }, { x: 260, y: 370 })
+assert.equal(dragRoot.style.transition, 'none')
+dispatchPointer('pointercancel', { x: 0, y: 0 })
+assert.equal(nativeEvents[1], 'drag:0', 'release precedes drag cleanup')
+assert.equal(dragContext.drag.active, false)
+assert.equal(dragRoot.style.transition, '')
+assert.equal(dragContext.state.left, 200)
+assert.equal(dragContext.state.top, 300)
+nativeEvents.length = 0
+dragContext.endDrag({}, false, true)
+assert.deepEqual(nativeEvents, [], 'inactive cleanup does not release another gesture')
+dispatchPointer('pointerdown', { whale: true })
+dispatchPointer('pointerup', { whale: true })
+assert.equal(dragContext.drag.active, false)
+assert.equal(nativeEvents[0], 'drag:1')
+assert.equal(nativeEvents[1], 'drag:0')
+nativeEvents.length = 0
+const clicksBeforeBlur = whaleClicks
+dispatchPointer('pointerdown', { whale: true })
+dragContext.drag.moved = true
+dragContext.state.left = 450
+dragContext.state.top = 500
+windowListeners.get('blur')()
+assert.equal(nativeEvents[1], 'drag:0', 'blur releases capture before page cleanup')
+assert.equal(dragContext.drag.active, false, 'blur ends a drag even if pointerup goes to another window')
+assert.equal(dragContext.state.left, 200)
+assert.equal(dragContext.state.top, 300)
+assert.equal(dragRoot.style.transition, '')
+assert.equal(pointerListeners.get('pointermove').size, 1, 'only the persistent pointer observer remains')
+assert.equal(pointerListeners.get('pointerup').size, 0)
+assert.equal(pointerListeners.get('pointercancel').size, 0)
+assert.equal(whaleClicks, clicksBeforeBlur, 'losing focus must not click the whale')
+console.log('PASS: native capture starts only for whale drag; menu, non-hit, right-click, release, cancellation and blur')

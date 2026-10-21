@@ -98,7 +98,6 @@ dsh-whale-widget/
 `native/window/` contains the WPF/WebView2 host, bounded HWND region helper and
 SDK redistribution notices. `assets/window.html` is the authenticated standalone
 page; host/frontend changes stay in the existing bundle. `tools/window-region-test.mjs`
-and `tools/window-region-test.ps1` guard DOM/native geometry in normal CI and the
-manual publication workflow. Native tests run on Windows without a preinstalled
-Harness or any personal profile. See `native/window/README.md` for limitations and
-manual interaction checks.
+and `tools/window-region-test.ps1` cover DOM/native geometry in normal CI and the
+manual publication workflow; `tools/window-host-test.mjs` covers the window
+lifecycle. See `native/window/README.md` for implementation and maintenance details.

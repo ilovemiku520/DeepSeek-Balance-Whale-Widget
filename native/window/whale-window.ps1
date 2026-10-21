@@ -268,6 +268,8 @@ public static class WhaleWindowBridge
 
     public static void BeginDrag()
     {
+        // Web messages can arrive after the physical button was released.
+        if (!LeftButtonDown) return;
         try
         {
             if (targetHwnd != IntPtr.Zero) SetCapture(targetHwnd);
@@ -485,6 +487,8 @@ $window.Add_Loaded({
 
 $window.Add_Closed({
   Write-Log 'window closed'
+  try { [WhaleWindowBridge]::EndDrag() } catch { }
+  try { $wv.Dispose() } catch { }
   if ($StateFile) {
     try { Set-Content -LiteralPath $StateFile -Value '{"alive":false}' -Encoding UTF8 } catch { }
   }
@@ -522,6 +526,20 @@ $script:regionLastOk = [Environment]::TickCount
 $script:regionLastSnapshot = ''
 $script:regionFailures = 0
 $script:regionRequestedAt = [Environment]::TickCount
+$script:inputRepairs = 0
+
+function Protect-WebViewInput {
+  if (-not [WhaleWebViewInput]::Guard([uint32]$wv.CoreWebView2.BrowserProcessId)) {
+    Write-Log 'FATAL: cannot release WebView2 backing-window input'
+    $window.Close()
+    return $false
+  }
+  if ([WhaleWebViewInput]::Repairs -ne $script:inputRepairs) {
+    $script:inputRepairs = [WhaleWebViewInput]::Repairs
+    Write-Log ('WebView2 backing input protected; windows=' + [WhaleWebViewInput]::ProtectedWindows + ' repairs=' + $script:inputRepairs)
+  }
+  return $true
+}
 
 function Clear-InputRegion {
   [void][WhaleWindowBridge]::SetClickThrough($true)
@@ -541,6 +559,10 @@ $hitTimer = New-Object System.Windows.Threading.DispatcherTimer
 $hitTimer.Interval = [TimeSpan]::FromMilliseconds(33)
 $hitTimer.Add_Tick({
   try {
+    Test-DragCapture
+    # The Chromium backing HWND is independent of the WPF window region.
+    # Recheck even when the DOM region is unchanged: Chromium can recreate it.
+    if ($script:coreReady -and -not (Protect-WebViewInput)) { return }
     if ([WhaleWindowBridge]::TakeNavigationStarted()) {
       [WhaleWindowBridge]::CancelHitRequest()
       $script:regionRequestedAt = [Environment]::TickCount
@@ -607,7 +629,7 @@ $hitTimer.Add_Tick({
 # ---------------------------------------------------------------------------
 $script:hostObservable = ($HostPid -gt 0 -and [bool](Get-Process -Id $HostPid -ErrorAction SilentlyContinue))
 
-# 拖动期间的复核（只在按住鼠标时运行，250ms 一次，松手即停）：
+# 每次区域刷新前复核原生捕获（33ms），不等待页面快照或主心跳：
 # ① 松手事件丢了（松在任务栏上最典型）→ 释放捕获并让页面收尾，别让挂件停在按下态；
 # ② 捕获转交到其他窗口 → 结束本次拖动，不抢回其他应用的输入。
 function Test-DragCapture {
@@ -624,20 +646,11 @@ function Test-DragCapture {
     Write-Log 'drag ended (capture transferred to another window)'
   }
 }
-$dragTimer = New-Object System.Windows.Threading.DispatcherTimer
-$dragTimer.Interval = [TimeSpan]::FromMilliseconds(250)
-$dragTimer.Add_Tick({ try { Test-DragCapture } catch { } })
-
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds($TickMs)
 $timer.Add_Tick({
   $script:ticks++
   try {
-    if ([WhaleWindowBridge]::Captured) {
-      if (-not $dragTimer.IsEnabled) { $dragTimer.Start() }
-    } elseif ($dragTimer.IsEnabled) {
-      $dragTimer.Stop()
-    }
     if ($script:ticks % 4 -eq 1) { Read-CommandFile }
     if ($script:ticks % 4 -eq 3) { Write-StateFile }
     if ($script:hostObservable -and ($script:ticks % 20 -eq 0)) {
@@ -653,6 +666,7 @@ $timer.Add_Tick({
       $script:coreReady = $true
       try { $wv.DefaultBackgroundColor = [System.Drawing.Color]::Transparent } catch { Write-Log ("set transparent bg failed: " + $_.Exception.Message) }
       try { [WhaleWindowBridge]::Attach($wv.CoreWebView2) } catch { Write-Log ("bridge attach failed: " + $_.Exception.Message) }
+      if (-not (Protect-WebViewInput)) { return }
       try {
         if ($script:authCookie) {
           $uri = [Uri]$Url

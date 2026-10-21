@@ -16,12 +16,35 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class RegionTestNative {
   [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int l,int t,int r,int b);
   [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr r);
   [DllImport("gdi32.dll")] public static extern bool PtInRegion(IntPtr r,int x,int y);
   [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr w,IntPtr r);
   [DllImport("user32.dll")] public static extern int GetGuiResources(IntPtr p,int flag);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr w,int index);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr w,int index,int value);
+  [DllImport("user32.dll")] public static extern bool SetLayeredWindowAttributes(IntPtr w,uint key,byte alpha,uint flags);
+  [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr w);
+  private delegate IntPtr WndProc(IntPtr w,uint message,IntPtr wp,IntPtr lp);
+  private static WndProc proc = DefWindowProc;
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  private struct WindowClass {
+    public uint style; public WndProc proc; public int classExtra,windowExtra;
+    public IntPtr instance,icon,cursor,background; public string menu,name;
+  }
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern ushort RegisterClass(ref WindowClass wc);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr CreateWindowEx(int ex,string cls,string name,int style,int x,int y,int w,int h,IntPtr parent,IntPtr menu,IntPtr instance,IntPtr arg);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr DefWindowProc(IntPtr w,uint msg,IntPtr wp,IntPtr lp);
+  public static IntPtr Surface(string name,int ex,byte alpha) {
+    WindowClass wc=new WindowClass();wc.proc=proc;wc.name=name;
+    RegisterClass(ref wc);
+    IntPtr hwnd=CreateWindowEx(ex,name,"input regression",unchecked((int)0x90000000),-24000,-24000,400,300,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
+    if(hwnd==IntPtr.Zero) throw new Exception("create backing-window fixture");
+    SetLayeredWindowAttributes(hwnd,0,alpha,2);
+    return hwnd;
+  }
 }
 '@
 $script:checks = 0
@@ -71,5 +94,46 @@ try {
   }
   $after = [RegionTestNative]::GetGuiResources($processHandle,0)
   Assert (($after-$before) -le 2) 'no GDI region leak across 1000 updates'
+
+  # Reproduce the independent alpha-zero Chromium HWND; clipping the WPF parent
+  # cannot affect it. The fixtures remain offscreen and receive no real input.
+  $ghost = [RegionTestNative]::Surface('Chrome_WidgetWin_1',0x8280080,0)
+  $otherClass = [RegionTestNative]::Surface('WhaleRegionUnrelatedTest',0x8280080,0)
+  try {
+    Assert ([WhaleWebViewInput]::Guard([uint32]($PID + 100000))) 'other browser process ignored'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -eq 0) 'other process window left untouched'
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'guard own alpha-zero backing window'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -ne 0) 'backing window becomes input transparent'
+    Assert (([RegionTestNative]::GetWindowLong($otherClass,-20) -band 0x20) -eq 0) 'unrelated window class left untouched'
+    [void][RegionTestNative]::SetWindowLong($ghost,-20,0x8280080)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'SDK style reset repaired'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -ne 0) 'repaired transparency verified'
+    [void][RegionTestNative]::SetLayeredWindowAttributes($ghost,0,255,2)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'visible surface restored'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -eq 0) 'visible surface regains original input'
+    [void][RegionTestNative]::SetLayeredWindowAttributes($ghost,0,0,2)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'protect again before SDK style change'
+    [void][RegionTestNative]::SetWindowLong($ghost,-20,0x2800a0)
+    [void][RegionTestNative]::SetLayeredWindowAttributes($ghost,0,255,2)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'restore after SDK changes backing styles'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -eq 0) 'style change does not strand transparent input'
+    [void][RegionTestNative]::SetWindowLong($ghost,-20,0x82800a0)
+    [void][RegionTestNative]::SetLayeredWindowAttributes($ghost,0,0,2)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'existing SDK transparency accepted'
+    [void][RegionTestNative]::SetLayeredWindowAttributes($ghost,0,255,2)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'SDK-owned transparency retained'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -ne 0) 'never remove a flag not added by the guard'
+    [void][RegionTestNative]::DestroyWindow($ghost)
+    $ghost = [RegionTestNative]::Surface('Chrome_WidgetWin_1',0x8280080,0)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'replacement backing HWND discovered'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -ne 0) 'replacement backing HWND protected'
+    [void][RegionTestNative]::DestroyWindow($ghost)
+    $ghost = [RegionTestNative]::Surface('Chrome_WidgetWin_1',0x82800a0,255)
+    Assert ([WhaleWebViewInput]::Guard([uint32]$PID)) 'new SDK-transparent visible window accepted'
+    Assert (([RegionTestNative]::GetWindowLong($ghost,-20) -band 0x20) -ne 0) 'new HWND never inherits old modification ownership'
+  } finally {
+    [void][RegionTestNative]::DestroyWindow($ghost)
+    [void][RegionTestNative]::DestroyWindow($otherClass)
+  }
   Write-Output "PASS: $script:checks native/parse/compile checks; 1000 region updates; GDI delta $($after-$before)"
 } finally { $form.Dispose() }

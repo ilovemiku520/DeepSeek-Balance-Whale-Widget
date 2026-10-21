@@ -10,25 +10,27 @@ DeepSeek Harness（DSH）Web 界面右下角的常驻挂件：小鲸鱼气泡图
 ## Windows 独立窗口（可选）
 
 在鲸鱼菜单启用「独立窗口」，挂件会在 DSH 最小化时继续显示；「独立窗口置顶」可单独切换。
-默认关闭。Windows 10/11 x64 需要 WebView2 Evergreen Runtime；缺失时回到页内挂件，不自动安装软件。
+功能默认关闭，适用于 x64 Windows 电脑系统，需要 Windows PowerShell 5.1 和 WebView2 Evergreen Runtime。
+Runtime 缺失时恢复页内挂件。
 
-窗口采用 WPF + WebView2CompositionControl，复用原网页界面。窗口只保留鲸鱼、气泡和面板的有限矩形区域，
-区域以外由 Windows 直接命中桌面；不再根据光标位置异步开关整个窗口的鼠标穿透。启动、页面失败或一秒无响应时，
-窗口区域清空并释放拖动捕获。CSS 坐标按实际客户区尺寸映射为物理像素，兼容 DPI 和浏览器缩放。
+窗口采用 WPF + WebView2CompositionControl，复用现有余额、菜单、气泡和音效。原生窗口的输入范围限制在
+鲸鱼、气泡和面板的矩形区域，区域外点击直接交给桌面；WebView2 创建的全透明 Chromium 窗口启用鼠标穿透，
+窗口重建或样式重置后自动恢复。仅拖动鲸鱼时捕获鼠标，拖动结束立即释放。关闭窗口时销毁 WebView2，
+快速重新打开会等待旧窗口退出。独立窗口显示期间，页内挂件隐藏并静音。
 
-限制：覆盖主屏工作区；矩形内的透明边角仍可能接收点击，不承诺像素级穿透；区域更新约每 33ms 发起一次，
-拖动/吸附动画可能短暂裁边。独立模式的弹窗只保留内容卡片，点击卡片外会操作桌面，请用卡片按钮关闭弹窗。
-页内版本的弹窗行为不变。独立窗口打开时页内挂件隐藏并静音。
+独立窗口使用主屏工作区，按约 33ms 周期更新矩形区域，并按实际客户区尺寸映射 CSS 坐标。
+矩形内的透明边角仍接收点击，拖动和吸附动画可能短暂裁边。弹窗保留内容卡片，点击卡片外会操作桌面；
+使用卡片按钮关闭弹窗。页面失败或一秒无响应时清空输入区域并释放鼠标捕获。
 
 配置、命令、状态和日志保存到 `$DSH_HOME`（默认用户目录的 `.dsh`）下 `.dshw-window*`，
-WebView2 数据放在 `whale-window-profile/`；源码位置按插件安装目录自动计算，不依赖开发机路径。
-宿主只在启动子进程时私下传递登录会话，首次导航前写入 WebView2；所有 HTTP 路由保留原有认证栅栏。
+WebView2 数据放在 `whale-window-profile/`。宿主通过子进程环境传递登录会话，首次导航前写入 WebView2；
+所有 HTTP 路由沿用插件认证。
 
 新增 `GET /dsh-whale/window.html` 与 `GET / HEAD / POST /dsh-whale/window.json`，全插件共 **28 个**路由。
 
 独立窗口基础实现来自 [lvxingye 的贡献](https://github.com/lvxingye/DeepSeek-Balance-Whale-Widget)
-及上游 [#264](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/264)，本次补上窗口区域、认证与发布验证。
-验证和维护说明见 [native/window/README.md](native/window/README.md)。
+及上游 [#264](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget/issues/264)。
+维护说明见 [native/window/README.md](native/window/README.md)。
 
 ## 两条分支怎么选
 

@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 
 // Clip the native HWND, including its WebView, rather than racing cursor probes.
 public static class WhaleWindowRegion
@@ -75,5 +76,105 @@ public static class WhaleWindowRegion
         }
         catch { return false; }
         finally { if (region != IntPtr.Zero) DeleteObject(region); }
+    }
+}
+
+// CompositionControl captures a Chromium backing window into a WPF Image.
+// That separate, alpha-zero top-level HWND must not receive desktop input.
+// WPF still forwards widget input through the composition controller.
+public static class WhaleWebViewInput
+{
+    private const int ExStyle = -20, Transparent = 0x20;
+    private const int BackingStyles = 0x80000 | 0x8000000 | 0x80; // layered, no-activate, tool
+    private const uint Alpha = 2;
+    private delegate bool EnumWindowProc(IntPtr hwnd, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc callback, IntPtr data);
+    [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+    [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder name, int length);
+    [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hwnd, int index);
+    [DllImport("user32.dll", SetLastError = true)] private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+    [DllImport("user32.dll")] private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint key, out byte alpha, out uint flags);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool SetProp(IntPtr hwnd, string name, IntPtr value);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetProp(IntPtr hwnd, string name);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr RemoveProp(IntPtr hwnd, string name);
+    // Only remember flags we added, so a surface that becomes visible can regain
+    // its original input behavior without changing SDK-owned transparent flags.
+    // Window properties disappear on destruction, including when Windows later
+    // reuses the same HWND value in this browser process.
+    private static readonly string marker = "DSHWhale.Input." + Guid.NewGuid().ToString("N");
+    public static int ProtectedWindows { get; private set; }
+    public static long Repairs { get; private set; }
+
+    private static bool WriteStyle(IntPtr hwnd, int style)
+    {
+        if (SetWindowLong(hwnd, ExStyle, style) == 0 && Marshal.GetLastWin32Error() != 0) return !IsWindow(hwnd);
+        // Do not wait for another process's input thread while it is unresponsive.
+        if (!SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, 0x1 | 0x2 | 0x4 | 0x10 | 0x20 | 0x4000)) return !IsWindow(hwnd);
+        return !IsWindow(hwnd) || (GetWindowLong(hwnd, ExStyle) & Transparent) == (style & Transparent);
+    }
+
+    public static bool Guard(uint browserPid)
+    {
+        if (browserPid == 0) return false;
+        bool ok = true;
+        int count = 0;
+        bool enumerated = EnumWindows(delegate(IntPtr hwnd, IntPtr data)
+        {
+            try
+            {
+                uint pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                if (pid != browserPid) return true;
+                int style = GetWindowLong(hwnd, ExStyle);
+                bool ours = GetProp(hwnd, marker) != IntPtr.Zero;
+                uint key = 0, flags = 0;
+                byte alpha = 255;
+                if (ours)
+                {
+                    if ((style & 0x80000) != 0 && !GetLayeredWindowAttributes(hwnd, out key, out alpha, out flags))
+                    {
+                        if (IsWindow(hwnd)) ok = false;
+                        return true;
+                    }
+                    // Restore first, even if the SDK also changed class/owner/styles.
+                    if ((flags & Alpha) == 0 || alpha != 0)
+                    {
+                        if (!WriteStyle(hwnd, style & ~Transparent)) { ok = false; return true; }
+                        RemoveProp(hwnd, marker);
+                        return true;
+                    }
+                }
+                else
+                {
+                    if (GetWindow(hwnd, 4) != IntPtr.Zero || GetParent(hwnd) != IntPtr.Zero || (style & BackingStyles) != BackingStyles) return true;
+                    var name = new StringBuilder(64);
+                    if (GetClassName(hwnd, name, name.Capacity) == 0 || name.ToString() != "Chrome_WidgetWin_1") return true;
+                    if (!GetLayeredWindowAttributes(hwnd, out key, out alpha, out flags)) return true;
+                }
+                if ((flags & Alpha) != 0 && alpha == 0)
+                {
+                    if (IsWindowVisible(hwnd)) count++;
+                    if ((style & Transparent) == 0)
+                    {
+                        if (!SetProp(hwnd, marker, new IntPtr(1)))
+                        {
+                            if (IsWindow(hwnd)) ok = false;
+                            return true;
+                        }
+                        if (!WriteStyle(hwnd, style | Transparent)) { ok = false; return true; }
+                        Repairs++;
+                    }
+                }
+            }
+            catch { ok = false; }
+            return true;
+        }, IntPtr.Zero);
+        ProtectedWindows = count;
+        return enumerated && ok;
     }
 }
